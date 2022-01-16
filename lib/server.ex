@@ -1,6 +1,6 @@
 defmodule BuildPipeline.Server do
   use GenServer
-  alias BuildPipeline.BuildStepRunner
+  alias BuildPipeline.{BuildStepRunner, RunnerMessage}
   alias IO.ANSI
 
   @moduledoc false
@@ -22,13 +22,15 @@ defmodule BuildPipeline.Server do
   def init({setup, parent_pid}) do
     %{build_pipeline: build_pipeline, setup: %{verbose: verbose, cwd: cwd}} = setup
 
+    terminal_width = RunnerMessage.fetch_terminal_width()
     runners = init_waiting_runners(build_pipeline, cwd)
 
     state = %{
       runners: runners,
       parent_pid: parent_pid,
-      output_lines: put_pending_runners(runners),
-      verbose: verbose
+      runner_messages: print_runners_pending(runners, terminal_width),
+      verbose: verbose,
+      terminal_width: terminal_width
     }
 
     {:ok, state, {:continue, :start_runners}}
@@ -57,7 +59,7 @@ defmodule BuildPipeline.Server do
     command = state[:runners][runner_pid][:command]
     message = "#{ANSI.magenta()}#{command} [Running]#{ANSI.reset()}"
 
-    {:noreply, print_runner_message(state, runner_pid, message)}
+    {:noreply, RunnerMessage.print(state, runner_pid, message)}
   end
 
   @impl true
@@ -65,55 +67,17 @@ defmodule BuildPipeline.Server do
     send(parent_pid, {:server_done, parse_result(state)})
   end
 
-  defp put_pending_runners(runners) do
+  defp print_runners_pending(runners, terminal_width) do
     runners
     |> Enum.map(fn {pid, build_step} -> {pid, build_step} end)
     |> Enum.sort(fn {_, %{order: order_1}}, {_, %{order: order_2}} -> order_1 <= order_2 end)
     |> Map.new(fn {pid, %{order: order, command: command}} ->
-      line_number = order + 1
+      order = order + 1
 
       message = "#{ANSI.light_magenta()}#{command} [Pending]#{ANSI.reset()}"
+      runner_message = RunnerMessage.print_first(message, order, terminal_width)
 
-      if should_print_runner_output?() do
-        IO.puts(message)
-      end
-
-      {pid, %{line_number: line_number, content: message}}
-    end)
-  end
-
-  defp print_runner_message(%{verbose: false} = state, runner_pid, message) do
-    %{line_number: line_number} = Map.fetch!(state.output_lines, runner_pid)
-
-    max_lines = max_runner_output_lines(state.output_lines)
-
-    line_shift = max_lines - line_number + 1
-
-    if should_print_runner_output?() do
-      IO.write(
-        "\r#{ANSI.cursor_up(line_shift)}\r#{ANSI.clear_line()}#{message}#{ANSI.cursor_down(line_shift)}\r"
-      )
-    end
-
-    output_line = %{line_number: line_number, content: message}
-    %{state | output_lines: Map.put(state.output_lines, runner_pid, output_line)}
-  end
-
-  defp print_runner_message(%{verbose: true} = state, _runner_pid, message) do
-    if should_print_runner_output?() do
-      IO.puts(message)
-    end
-
-    state
-  end
-
-  defp max_runner_output_lines(output_lines) do
-    Enum.reduce(output_lines, 0, fn {_pid, %{line_number: line_number}}, acc ->
-      if line_number >= acc do
-        line_number
-      else
-        acc
-      end
+      {pid, runner_message}
     end)
   end
 
@@ -164,7 +128,7 @@ defmodule BuildPipeline.Server do
 
   defp print_runner_failed(%{verbose: false} = state, result, runner_pid) do
     message = runner_failed_duration_message(result)
-    print_runner_message(state, runner_pid, message)
+    RunnerMessage.print(state, runner_pid, message)
   end
 
   defp print_runner_failed(%{verbose: true} = state, result, runner_pid) do
@@ -178,7 +142,7 @@ defmodule BuildPipeline.Server do
     #{ANSI.red()}---------------------------------------------------------------------#{ANSI.reset()}
     """
 
-    print_runner_message(state, runner_pid, message)
+    RunnerMessage.print(state, runner_pid, message)
   end
 
   defp runner_failed_duration_message(result) do
@@ -198,7 +162,7 @@ defmodule BuildPipeline.Server do
 
   defp print_runner_succeeded(%{verbose: false} = state, result, runner_pid) do
     message = runner_finished_in_duration_message(result)
-    print_runner_message(state, runner_pid, message)
+    RunnerMessage.print(state, runner_pid, message)
   end
 
   defp print_runner_succeeded(%{verbose: true} = state, result, runner_pid) do
@@ -212,7 +176,7 @@ defmodule BuildPipeline.Server do
     #{ANSI.green()}---------------------------------------------------------------------#{ANSI.reset()}
     """
 
-    print_runner_message(state, runner_pid, message)
+    RunnerMessage.print(state, runner_pid, message)
   end
 
   defp runner_finished_in_duration_message(result) do
@@ -244,7 +208,7 @@ defmodule BuildPipeline.Server do
 
       {runner_pid, %{command: command}}, state ->
         message = "#{ANSI.magenta()}#{ANSI.crossed_out()}#{command} [Aborted]#{ANSI.reset()}"
-        print_runner_message(state, runner_pid, message)
+        RunnerMessage.print(state, runner_pid, message)
     end)
   end
 
@@ -282,9 +246,5 @@ defmodule BuildPipeline.Server do
       build_step = Map.put(build_step, :status, :incomplete)
       Map.put(runners, runner_pid, build_step)
     end)
-  end
-
-  defp should_print_runner_output? do
-    Application.get_env(:build_pipeline, :print_runner_output, true)
   end
 end

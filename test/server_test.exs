@@ -92,7 +92,7 @@ defmodule BuildPipeline.ServerTest do
 
     test "runs build steps, returning the result of the first that fails along with those that succeeded" do
       capture_io(fn ->
-        assert {:ok, server_pid} = Server.start_link({failing_setup(), self()})
+        assert {:ok, _server_pid} = Server.start_link({failing_setup(), self()})
 
         assert_receive {:server_done,
                         %{
@@ -254,6 +254,47 @@ defmodule BuildPipeline.ServerTest do
         end)
 
       assert output =~ " notARealShellCommand: not found"
+
+      Application.put_env(:build_pipeline, :print_runner_output, original_env)
+    end
+
+    test "really long commands output sensibly" do
+      original_env = Application.get_env(:build_pipeline, :print_runner_output)
+
+      Application.put_env(:build_pipeline, :print_runner_output, true)
+
+      server_setup = %{
+        build_pipeline: [
+          %{
+            build_step_name: "long echo 1",
+            command: "echo '#{String.duplicate("A", 300)}'",
+            command_env_vars: [],
+            command_type: :shell_command,
+            depends_on: MapSet.new(),
+            order: 0
+          },
+          %{
+            build_step_name: "long echo 2",
+            command: "echo '#{String.duplicate("B", 300)}'",
+            command_env_vars: [],
+            command_type: :shell_command,
+            depends_on: MapSet.new(),
+            order: 1
+          }
+        ],
+        setup: %{cwd: ".", verbose: false}
+      }
+
+      assert {:ok, _server_pid} = Server.start_link({server_setup, self()})
+      assert_receive {:server_done, _}, 1_000
+
+      # output =
+      #  capture_io(fn ->
+      #    assert {:ok, _server_pid} = Server.start_link({server_setup, self()})
+      #    assert_receive {:server_done, _}, 1_000
+      #  end)
+
+      # assert output =~ " notARealShellCommand: not found"
 
       Application.put_env(:build_pipeline, :print_runner_output, original_env)
     end
